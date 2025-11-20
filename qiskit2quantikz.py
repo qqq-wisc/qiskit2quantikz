@@ -18,15 +18,45 @@ def format_angle(angle):
     if result:
         numerator = frac.numerator if frac.numerator != 1 else ""
         denominator = f"/{frac.denominator}" if frac.denominator != 1 else ""
-        pretty_angle = f"{numerator}\pi{denominator}"
+        pretty_angle = f"{numerator}\\pi{denominator}"
     else:
         pretty_angle = angle
     return pretty_angle
 
+def conflicting_gates(circ : qiskit.QuantumCircuit, existing : DAGOpNode, new : DAGOpNode):
+    args_existing = set(existing.qargs[i] for i in range(len(existing.qargs)))
+    range_existing = range(min(circ.find_bit(qarg)[0] for qarg in args_existing), max(circ.find_bit(qarg)[0] for qarg in args_existing)+1)
+    args_new = set(new.qargs[i] for i in range(len(new.qargs)))
+    range_new = range(min(circ.find_bit(qarg)[0] for qarg in args_new), max(circ.find_bit(qarg)[0] for qarg in args_new)+1)
+    conflict =  any(circ.find_bit(qarg)[0] in range_existing for qarg in args_new) or any(circ.find_bit(qarg)[0] in range_new for qarg in args_existing)
+    print(existing.name, range_existing,  new.name, [circ.find_bit(qarg)[0] for qarg in args_new], conflict)
+
+    return conflict
+
+
+def drawing_layers(circ : qiskit.QuantumCircuit):
+    layers = []
+    dag = qiskit.converters.circuit_to_dag(circ)
+    dag_layers = dag.multigraph_layers()
+    for layer in dag_layers:
+        # print("Layer:", layer )
+        op_nodes = [node for node in layer if isinstance(node, DAGOpNode)]
+        current_layer = []
+        for node in op_nodes:
+
+            if all(not conflicting_gates(circ, existing, node) for existing in current_layer):
+                current_layer.append(node)
+            else:
+                layers.append(current_layer)
+                current_layer = [node]
+        if current_layer:
+            layers.append(current_layer)
+    return layers
+
+
 def build_array(circ : qiskit.QuantumCircuit):
-        array = [[] for _ in range(circ.num_qubits)]
-        dag = qiskit.converters.circuit_to_dag(circ)
-        layers = dag.multigraph_layers()
+        array = [[''] for _ in range(circ.num_qubits)]
+        layers = drawing_layers(circ)
         for layer in layers:
             op_nodes = [node for node in layer if isinstance(node, DAGOpNode)]
             support_list = [
@@ -44,21 +74,42 @@ def build_array(circ : qiskit.QuantumCircuit):
                 elif len(node.qargs) == 1:
                     q = circ.find_bit(node.qargs[0])[0]
                     name, params = node.op.name, node.op.params
-                    array[q].append(f"\gate{{{render_gate_name(name, params)}}}")
+                    array[q].append(f"\\gate{{{render_gate_name(name, params)}}}")
                 elif node.name == 'cx':
                     ctrl = circ.find_bit(node.qargs[0])[0]
                     tar = circ.find_bit(node.qargs[1])[0]
-                    array[ctrl].append(f"\ctrl{{{tar-ctrl}}}")
+                    array[ctrl].append(f"\\ctrl{{{tar-ctrl}}}")
                     array[tar].append(f"\\targ{{}}")
+                elif node.name == 'cp':
+                    ctrl = circ.find_bit(node.qargs[0])[0]
+                    tar = circ.find_bit(node.qargs[1])[0]
+                    angle = node.op.params[0]
+                    pretty_angle = format_angle(angle)
+                    array[ctrl].append(f"\\ctrl{{{tar-ctrl}}}")
+                    array[tar].append(f"\\gate{{R_{{Z}}^{{{pretty_angle}}}}}")
+                     
+                elif node.name == 'swap':
+                    ctrl = circ.find_bit(node.qargs[0])[0]
+                    tar = circ.find_bit(node.qargs[1])[0]
+                    array[ctrl].append(f"\\swap{{{tar-ctrl}}}")
+                    array[tar].append(f"\\targX{{}}")
                 elif node.op.label == 'custom_block':
                      qubit_count = len(node.qargs)
                      first = circ.find_bit(node.qargs[0])[0] 
-                     array[first].append(f'\gate[{qubit_count}]{{{node.name}}}')
+                     array[first].append(f'\\gate[{qubit_count}]{{{node.name}}}')
+                     for rest in range(first+1, first+qubit_count):
+                          array[rest].append("")
+                elif node.op.label == 'pauli_str':
+                     qubit_count = len(node.qargs)
+                     first = circ.find_bit(node.qargs[0])[0] 
+                     array[first].append(f'\\gate[{qubit_count}, disable auto height]{{\\verticaltext{{{node.name}}}}}')
                      for rest in range(first+1, first+qubit_count):
                           array[rest].append("")
                      
                 else:
                     raise NotImplementedError
+        for row in array:
+            row.append('')
         return array
 
 def render_gate_name(name, params=None):
@@ -69,9 +120,9 @@ def render_gate_name(name, params=None):
     elif name == 'ry':
         return render_ry(params)
     elif name == 'tdg':
-        return "T^{\dag}"
+        return "T^{\\dag}"
     elif name == 'sdg':
-        return "S^{\dag}"
+        return "S^{\\dag}"
     else:
         param_str =  f"({','.join(params)})" if len(params) > 0 else ""
         return f"{name.upper()}" + param_str
@@ -134,7 +185,7 @@ class CircuitDrawing:
             if depth == -1:
                  print(f"Warning: ignoring unclosed box opened at layer {start_layer} on qubits {qubits}")
             else:
-                self._array[start_q][start_layer] +=  f"\gategroup[{len(qubits)},steps={depth},style={{rounded corners, dashed, inner sep=0pt, fill=blue!20}}, background]{{}}"
+                self._array[start_q][start_layer] +=  f"\\gategroup[{len(qubits)},steps={depth},style={{rounded corners, dashed, inner sep=0pt, fill=blue!20}}, background]{{}}"
 
      ## Gates
     def rz(self, angle, qubit):
@@ -180,6 +231,18 @@ class CircuitDrawing:
     def cx(self, ctrl, tar):
         self._circuit.cx(ctrl, tar)
     
+    def cp(self, angle, ctrl, tar):
+            if isinstance(angle, float):
+                self._circuit.cp(angle, ctrl, tar)
+            else:
+                if angle not in self._circuit_params:
+                    self._circuit_params[angle] = qiskit.circuit.Parameter(angle)
+                self._circuit.cp(self._circuit_params[angle], ctrl, tar)
+                
+    
+    def swap(self, ctrl, tar):
+        self._circuit.swap(ctrl, tar)
+    
     def block(self, name, start_qubit, end_qubit,):
         qubit_count = (end_qubit-start_qubit)+1
         temp = qiskit.QuantumCircuit(qubit_count, name=name)
@@ -188,7 +251,15 @@ class CircuitDrawing:
             temp.u(theta, phi, lam, qubit)
         g = temp.to_instruction(label="custom_block")
         self._circuit.append(g, qargs=range(start_qubit, end_qubit+1))
-
+    
+    def paulistr(self, str, angle):
+        qubit_count = self._circuit.num_qubits
+        temp = qiskit.QuantumCircuit(qubit_count, name=" ".join(str))
+        theta, phi, lam = qiskit.circuit.Parameter("theta"), qiskit.circuit.Parameter("phi"), qiskit.circuit.Parameter("lam")
+        for qubit in range(qubit_count):
+            temp.u(theta, phi, lam, qubit)
+        g = temp.to_instruction(label=f"pauli_str_{angle}")
+        self._circuit.append(g, qargs=range(0, self._circuit.num_qubits))
 
     # Must refresh the drawing representation before doing any sort of output
     def refresh(self):
@@ -217,7 +288,7 @@ class CircuitDrawing:
             if i < len(self._array)-1:
                 line += "\\\\"
             lines.append(line)
-        lines.append(f"\end{{quantikz}}")
+        lines.append(f"\\end{{quantikz}}")
         if standalone:
              lines.append("\\end{document}")
         return lines
@@ -225,10 +296,10 @@ class CircuitDrawing:
     def add_qubit_labels(self,labels):
         if labels == "q_n":
             for i,row in enumerate(self._array):
-                row[0] = f"\lstick{{$q_{i}$}}"
+                row[0] = f"\\lstick{{$q_{i}$}}"
         elif isinstance(labels, list):
             for i,row in enumerate(self._array):
-               row[0] = f"\lstick{{{labels[i]}}}"
+               row[0] = f"\\lstick{{{labels[i]}}}"
 
     
 
@@ -271,7 +342,7 @@ def rewrite_rule(left : CircuitDrawing, right : CircuitDrawing, qubit_labels=Non
         $\\to$
 {right}
   }};
-\end{{tikzpicture}}'''
+\\end{{tikzpicture}}'''
     if standalone:
             outstr += "\n\\end{document}"
     if filename:
@@ -284,3 +355,20 @@ def qiskit_rewrite(circ : qiskit.QuantumCircuit | CircuitDrawing, optimization_l
          circ = circ._circuit
     compiled = qiskit.transpile(circ, optimization_level=optimization_level)
     return rewrite_rule(left=CircuitDrawing(circ), right=CircuitDrawing(compiled), standalone=standalone, filename=filename)
+
+if __name__ == "__main__":
+    qft_circuit = qiskit.QuantumCircuit(4)
+    qft_circuit.h(0)
+    qft_circuit.cp(math.pi/2, 0, 1)
+    qft_circuit.cp(math.pi/4, 0, 2)
+    qft_circuit.cp(math.pi/8, 0, 3)
+    qft_circuit.barrier()
+    qft_circuit.h(1)
+    qft_circuit.cp(math.pi/2, 1, 2)
+    qft_circuit.cp(math.pi/4, 1, 3)
+    qft_circuit.barrier()
+    qft_circuit.h(2)
+    qft_circuit.cp(math.pi/2, 2, 3)
+    qft_circuit.h(3)
+    d1 = CircuitDrawing(qft_circuit)
+    d1.draw(standalone=True,filename="qft.tex", qubit_labels="q_n")
